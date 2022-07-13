@@ -1,0 +1,30 @@
+bad_request;400;Bad request.
+unauthorized;401;Unauthorized.
+forbidden;403;Forbidden.
+token_expired;401;Token is expired.
+issuer;403;Invalid token issuer.
+session_sub;403;Invalid token subject.
+grant_type;400;Invalid grant type.
+session;403;No such session.
+client_id;400;No such client id.
+no_user;404;No such user.
+no_client;400;No client with that id.
+no_grant_type;400;Unsupported grant type.
+social_not_found;400;No such social provider.
+discover_status;500;The server did not return a 200 status code.
+unsupported_response_types;500;The social provider does not support 'id_token' response types.
+invalid_credentials;400;Invalid credentials.
+unverified_email;403;Unverified email.
+unsupported_token_type;400;Unsupported token type.
+too_many_requests;429;Too many requests.
+email_already_registered;400;The email address is already registered.
+invalid_aud;400;Invalid token audience.
+invalid_iss;400;Invalid token issuer.
+invalid_jwk;0;Invalid JWK.
+unknown_jwk_kty;400;Unknown JWK key type.
+no_kid;400;The token has no key id set.
+kid_not_found;400;The key id was not found.
+jwks_content_type;500;The jwks response has an invalid content type.
+
+password_reset;2001;Password reset.
+password_reset_requested;2002;Password reset requested.
