@@ -13,6 +13,15 @@ import (
 	"github.com/halliday/go-tools"
 )
 
+const Issuer = "iss"
+const NotBefore = "nbf"
+const Audience = "aud"
+const Subject = "sub"
+const ExpiresAt = "exp"
+const IssuedAt = "iat"
+const AccessTokenSubjectPrefix = "user|"
+const RefreshTokenSubjectPrefix = "session|"
+
 type Server struct {
 	Addr string
 
@@ -20,22 +29,22 @@ type Server struct {
 
 	route           router.Route
 	RefreshTokenKey []byte
-	AccessTokenKey  []byte
+	TokenKey        []byte
 	TokenExpiry     time.Duration
 
-	Clients map[string]*Client
+	// Clients map[string]*Client
 
 	SessionStore SessionStore
 	UserStore    UserStore
 }
 
-func NewServer(addr string, sessionStore SessionStore, userStore UserStore, clients map[string]*Client, next http.Handler) *Server {
+func NewServer(addr string, sessionStore SessionStore, userStore UserStore, next http.Handler) *Server {
 	s := &Server{
 		Addr:         addr,
 		SessionStore: sessionStore,
 		UserStore:    userStore,
-		Clients:      clients,
-		TokenExpiry:  time.Minute * 10,
+		// Clients:      clients,
+		TokenExpiry: time.Minute * 10,
 		Config: &Configuration{
 			Issuer:                addr,
 			AuthorizationEndpoint: addr + "login",
@@ -120,9 +129,9 @@ func (s *Server) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	s.route.ServeHTTP(resp, req)
 }
 
-func (s *Server) getClient(clientId string) *Client {
-	return s.Clients[clientId]
-}
+// func (s *Server) getClient(clientId string) *Client {
+// 	return s.Clients[clientId]
+// }
 
 func (s *Server) serveToken(resp http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
@@ -153,18 +162,8 @@ func (s *Server) serveToken(resp http.ResponseWriter, req *http.Request) {
 	switch grantType {
 	case "refresh_token":
 		refreshToken := req.Form.Get("refresh_token")
-
-		aud, sess, err := s.ParseRefreshToken(refreshToken)
-		if err != nil {
-			tools.ServeError(resp, err)
-			return
-		}
-		sub, scopes, err := s.SessionStore.RefreshSession(ctx, aud, sess)
-		if err != nil {
-			tools.ServeError(resp, err)
-			return
-		}
-		accessToken, err := s.CreateAccessToken(aud, sub, scopes)
+		scopes := NewScopes(req.Form.Get("scope"))
+		accessToken, scopes, expiresIn, err := s.RefreshSession(ctx, refreshToken, scopes)
 		if err != nil {
 			tools.ServeError(resp, err)
 			return
@@ -172,7 +171,8 @@ func (s *Server) serveToken(resp http.ResponseWriter, req *http.Request) {
 		tools.ServeJSON(resp, TokenResponse{
 			AccessToken: accessToken,
 			TokenType:   "Bearer",
-			ExiresIn:    int64(s.TokenExpiry / time.Second),
+			ExpiresIn:   expiresIn,
+			Scope:       Scopes(scopes).String(),
 		})
 		return
 
@@ -193,12 +193,34 @@ func (s *Server) serveToken(resp http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func (s *Server) Userinfo(ctx context.Context, accessToken string) (*Userinfo, error) {
+	_, sub, scopes, _, _, err := s.ParseAccessToken(accessToken)
+	if err != nil {
+		return nil, err
+	}
+	if !Scopes(scopes).Has("openid") {
+		return nil, e("missing_scope", "openid")
+	}
+	return s.UserStore.Userinfo(ctx, sub)
+
+}
+
 func (s *Server) userinfo(ctx context.Context) (*Userinfo, error) {
 	sess := CtxSession(ctx)
 	if sess == nil {
 		return nil, e("unauthorized")
 	}
 	return s.UserStore.Userinfo(ctx, sess.Subject)
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+func (s *Server) Revoke(ctx context.Context, refreshToken string) (err error) {
+	aud, id, err := s.ParseRefreshToken(refreshToken)
+	if err != nil {
+		return err
+	}
+	return s.SessionStore.RevokeSession(ctx, aud, id)
 }
 
 type RevokeTokenRequest struct {
@@ -212,16 +234,18 @@ func (s *Server) revokeToken(ctx context.Context, req *RevokeTokenRequest) (err 
 		tokenType = TokenType(req.Token)
 	}
 	if tokenType == "refresh_token" {
-		aud, id, err := s.ParseRefreshToken(req.Token)
+		err := s.Revoke(ctx, req.Token)
 		if err != nil {
 			// throw no error on invalid tokens
 			// https://datatracker.ietf.org/doc/html/rfc7009#section-2.2
 			return nil
 		}
-		return s.SessionStore.RevokeSession(ctx, aud, id)
+		return nil
 	}
 	return e("unsupported_token_type")
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 type tokenClaims struct {
 	Subject string `json:"sub"`
@@ -244,91 +268,176 @@ func TokenType(token string) string {
 	if strings.HasPrefix(claims.Subject, AccessTokenSubjectPrefix) {
 		return "access_token"
 	}
-	return ""
+	return "" // unknown
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+func (server *Server) CreateToken(claims map[string]interface{}) (string, error) {
+	if aud, _ := claims[Audience].(string); aud == "" {
+		panic("CreateToken: missing aud")
+	}
+	if sub, _ := claims[Subject].(string); sub == "" {
+		panic("CreateToken: missing sub")
+	}
+	mapClaims := jwt.MapClaims{
+		"iss": server.Addr,
+		"iat": time.Now().Unix(),
+	}
+	for key, value := range claims {
+		mapClaims[key] = value
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, mapClaims)
+	return token.SignedString(server.TokenKey)
+}
+
+func (server *Server) ParseToken(str string) (claims map[string]interface{}, err error) {
+	claims = make(map[string]interface{})
+	p := jwt.NewParser(jwt.WithoutClaimsValidation())
+	_, err = p.ParseWithClaims(str, jwt.MapClaims(claims), func(token *jwt.Token) (interface{}, error) {
+		if token.Method != jwt.SigningMethodHS256 {
+			return nil, e("token_bad_alg", token.Header["alg"])
+		}
+		return server.TokenKey, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// claims = token.Claims.(jwt.MapClaims)
+	iss, _ := claims[Issuer].(string)
+	if iss != server.Addr {
+		return claims, e("token_bad_iss")
+	}
+
+	if nbf, ok := claims[NotBefore].(float64); ok {
+		if time.Now().Unix() < int64(nbf) {
+			return claims, e("token_bad_nbf")
+		}
+	}
+	if exp, ok := claims[ExpiresAt].(float64); ok {
+		if time.Now().Unix() > int64(exp) {
+			return claims, e("token_bad_exp")
+		}
+	}
+	if iat, ok := claims[IssuedAt].(float64); ok {
+		if time.Now().Unix() < int64(iat) {
+			return claims, e("token_bad_iat")
+		}
+	}
+
+	return claims, nil
+}
+
+type AccessToken struct {
+	Audience  string `json:"aud"`
+	Subject   string `json:"sub"`
+	Scope     string `json:"scope"`
+	ExpiresAt int64  `json:"exp"`
+	IssuedAt  int64  `json:"iat"`
+}
+
+func (t AccessToken) Valid() error {
+	now := time.Now().Unix()
+	if t.ExpiresAt < now {
+		return e("token_bad_exp")
+	}
+	return nil
 }
 
 func (s *Server) CreateAccessToken(aud string, sub string, scopes []string) (string, error) {
-	return s.CreateAccessTokenExp(aud, sub, scopes, s.TokenExpiry)
-}
-
-const AccessTokenSubjectPrefix = "user|"
-
-func (s *Server) CreateAccessTokenExp(aud string, sub string, scopes []string, exp time.Duration) (string, error) {
-	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"aud":   aud,
-		"iss":   s.Addr,
-		"sub":   AccessTokenSubjectPrefix + sub,
-		"scope": strings.Join(scopes, " "),
-		"iat":   time.Now().Unix(),
-		"exp":   time.Now().Add(exp).Unix(),
+	return s.CreateToken(map[string]interface{}{
+		Audience:  aud,
+		Subject:   AccessTokenSubjectPrefix + sub,
+		"scope":   strings.Join(scopes, " "),
+		ExpiresAt: time.Now().Add(s.TokenExpiry).Unix(),
 	})
-	return accessToken.SignedString(s.AccessTokenKey)
 }
 
 var noTime time.Time
 
 func (s *Server) ParseAccessToken(accessToken string) (aud string, sub string, scopes []string, iat time.Time, exp time.Time, err error) {
-	token, err := jwt.Parse(accessToken, func(token *jwt.Token) (interface{}, error) {
-		if token.Method != jwt.SigningMethodHS256 {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		return s.AccessTokenKey, nil
-	})
+	claims, err := s.ParseToken(accessToken)
 	if err != nil {
-		switch er := err.(type) {
-		case *jwt.ValidationError:
-			if er.Errors&jwt.ValidationErrorExpired != 0 {
-				return "", "", nil, noTime, noTime, e("token_expired")
-			}
-		}
 		return "", "", nil, noTime, noTime, err
 	}
-	claims := token.Claims.(jwt.MapClaims)
-	aud = claims["aud"].(string)
-
-	sub, ok := claims["sub"].(string)
+	sub, ok := claims[Subject].(string)
 	if !ok || !strings.HasPrefix(sub, AccessTokenSubjectPrefix) {
 		return "", "", nil, noTime, noTime, fmt.Errorf("bad accessToken claims: bad subject")
 	}
 	sub = sub[len(AccessTokenSubjectPrefix):]
+
+	aud = claims[Audience].(string)
+
 	scopesStr := claims["scope"].(string)
 	if scopesStr != "" {
 		scopes = strings.Split(scopesStr, " ")
 	}
-	iat = time.Unix(int64(claims["iat"].(float64)), 0)
-	exp = time.Unix(int64(claims["exp"].(float64)), 0)
+	iat = time.Unix(int64(claims[IssuedAt].(float64)), 0)
+	exp = time.Unix(int64(claims[ExpiresAt].(float64)), 0)
 	return aud, sub, scopes, iat, exp, nil
 }
 
-const RefreshTokenSubjectPrefix = "session|"
+func (s *Server) CreateSession(ctx context.Context, aud string, sub string, scopes []string, nonce string) (refreshToken string, accessToken string, grantedScopes []string, expiresIn int64, idToken string, err error) {
+
+	sess, grantedScopes, err := s.SessionStore.CreateSession(ctx, aud, sub, scopes)
+	if err != nil {
+		return "", "", nil, 0, "", err
+	}
+	accessToken, err = s.CreateAccessToken(aud, sub, grantedScopes)
+	if err != nil {
+		return "", "", nil, 0, "", err
+	}
+	refreshToken, err = s.CreateRefreshToken(aud, sess)
+	if err != nil {
+		return "", "", nil, 0, "", err
+	}
+
+	if Scopes(grantedScopes).Has("openid") {
+		user, err := s.UserStore.Userinfo(ctx, sub)
+		if err != nil {
+			return "", "", nil, 0, "", err
+		}
+		idToken, err = s.CreateIdToken(aud, user, nonce)
+		if err != nil {
+			return "", "", nil, 0, "", err
+		}
+	}
+
+	return refreshToken, accessToken, grantedScopes, int64(s.TokenExpiry / time.Second), idToken, nil
+}
+
+func (s *Server) RefreshSession(ctx context.Context, refreshToken string, newScopes []string) (accessToken string, grantedScopes []string, expiresIn int64, err error) {
+	aud, sess, err := s.ParseRefreshToken(refreshToken)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	sub, grantedScopes, err := s.SessionStore.RefreshSession(ctx, aud, sess, newScopes)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	accessToken, err = s.CreateAccessToken(aud, sub, grantedScopes)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	return accessToken, grantedScopes, int64(s.TokenExpiry / time.Second), nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 func (s *Server) CreateRefreshToken(aud string, sess string) (string, error) {
-	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"aud": aud,
-		"iss": s.Addr,
-		"iat": time.Now().Unix(),
-		"sub": RefreshTokenSubjectPrefix + sess,
+	return s.CreateToken(map[string]interface{}{
+		Audience: aud,
+		"sub":    RefreshTokenSubjectPrefix + sess,
 	})
-	return refreshToken.SignedString(s.RefreshTokenKey)
 }
 
 func (s *Server) ParseRefreshToken(refreshToken string) (aud string, sess string, err error) {
-	token, err := jwt.Parse(refreshToken, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		return s.RefreshTokenKey, nil
-	})
+	claims, err := s.ParseToken(refreshToken)
 	if err != nil {
 		return "", "", err
 	}
-	claims := token.Claims.(jwt.MapClaims)
-	aud, _ = claims["aud"].(string)
-	iss, _ := claims["iss"].(string)
-	sub, _ := claims["sub"].(string)
-	if iss != s.Addr {
-		return "", "", e("issuer")
-	}
+	aud, _ = claims[Audience].(string)
+	sub, _ := claims[Subject].(string)
 	if !strings.HasPrefix(sub, RefreshTokenSubjectPrefix) {
 		return "", "", e("session_sub")
 	}
@@ -336,123 +445,78 @@ func (s *Server) ParseRefreshToken(refreshToken string) (aud string, sess string
 	return aud, sub, err
 }
 
-func (s *Server) createIdToken(aud string, none string, u *Userinfo) (string, error) {
+func (s *Server) CreateIdToken(aud string, u *Userinfo, nonce string) (string, error) {
 	claims := IdTokenClaims{
+		Issuer:   s.Addr,
 		Audience: aud,
 		Userinfo: *u,
-		Nonce:    none,
+		Nonce:    nonce,
 	}
 	idToken := jwt.NewWithClaims(jwt.SigningMethodNone, claims)
 	return idToken.SignedString(jwt.UnsafeAllowNoneSignatureType)
 }
 
-type TokenRequest struct {
-	Subject string `json:"-"`
+////////////////////////////////////////////////////////////////////////////////
 
+// https://www.rfc-editor.org/rfc/rfc6749#section-4.1.1
+// https://www.rfc-editor.org/rfc/rfc6749#section-4.2.1
+
+type AuthRequest struct {
 	ClientId     string
-	ResponseType string
+	ResponseType string // code, token, id_token
 	Scope        string
-	// State        string
-	// RedirectUri  string
-	Nonce string
+	State        string
+	RedirectUri  string
+	Nonce        string
 }
 
-// type AuthorizationRequest struct {
-// 	ClientId string `json:"client_id"`
-// 	TokenRequest
-// 	State       string `json:"state"`
-// 	RedirectUri string `json:"redirect_uri"`
-// }
+type AuthResponse struct {
+	// for ReponseType = code
+	Code string
 
-type TokenResponse struct {
-	// for ResponseType = code
-	Code string `json:"code"`
-
-	// for ResponseType = token
+	// for ReponseType = token
 	TokenType    string `json:"token_type"`
 	AccessToken  string `json:"access_token"`
-	ExiresIn     int64  `json:"expires_in,omitempty"`
+	ExpiresIn    int64  `json:"expires_in,omitempty"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	Scope        string `json:"scope,omitempty"`
 
 	// for ReponseType = id_token
 	IdToken string `json:"id_token,omitempty"`
+
+	State string `json:"state,omitempty"`
 }
 
-func (s *Server) Authorize(ctx context.Context, req *TokenRequest) (resp *TokenResponse, err error) {
-	sub := req.Subject
-	responseTypes := strings.Split(req.ResponseType, " ")
-	scopes := NewScopes(req.Scope)
-	resp = new(TokenResponse)
+type TokenRequest struct {
+	GrantType string `json:"grant_type"` // authorization_code, refresh_token
 
-	if stringSliceIncludes(responseTypes, "token") {
-		sess, err := s.SessionStore.CreateSession(ctx, req.ClientId, sub, scopes)
-		if err != nil {
-			return nil, err
-		}
-		accessToken, err := s.CreateAccessToken(req.ClientId, sub, scopes)
-		if err != nil {
-			return nil, err
-		}
-		refreshToken, err := s.CreateRefreshToken(req.ClientId, sess)
-		if err != nil {
-			return nil, err
-		}
-		resp.Scope = scopes.String()
-		resp.AccessToken = accessToken
-		resp.RefreshToken = refreshToken
-		resp.TokenType = "Bearer"
-		resp.ExiresIn = int64(s.TokenExpiry / time.Second)
-	}
+	// for GrantType = authorization_code
+	// https://www.rfc-editor.org/rfc/rfc6749#section-4.1.3
+	Code        string `json:"code"`
+	RedirectUri string `json:"redirect_uri"` // must match the redirect_uri in the auth request
+	ClientId    string `json:"client_id"`
 
-	if stringSliceIncludes(responseTypes, "id_token") && scopes.Has("openid") {
-		userinfo, err := s.UserStore.Userinfo(ctx, sub)
-		if err != nil {
-			return nil, err
-		}
-		idToken, err := s.createIdToken(sub, req.Nonce, userinfo)
-		if err != nil {
-			return nil, err
-		}
-		resp.IdToken = idToken
-	}
+	// for GrantType = refresh_token
+	// https://www.rfc-editor.org/rfc/rfc6749#section-6
+	RefreshToken string `json:"refresh_token"`
+	Scope        string `json:"scope"`
 
-	return resp, nil
+	Nonce string `json:"nonce"`
 }
 
-// func (r TokenRequest) Values() url.Values {
-// 	v := make(url.Values)
-// 	v.Set("client_id", r.ClientId)
-// 	v.Set("response_type", r.ResponseType)
-// 	v.Set("redirect_uri", r.RedirectUri)
-// 	if r.Scope != "" {
-// 		v.Set("scope", r.Scope)
-// 	}
-// 	if r.State != "" {
-// 		v.Set("state", r.State)
-// 	}
-// 	if r.Nonce != "" {
-// 		v.Set("nonce", r.Nonce)
-// 	}
-// 	return v
-// }
+type TokenResponse struct {
+	// for ResponseType = token
+	TokenType    string `json:"token_type"`
+	AccessToken  string `json:"access_token"`
+	ExpiresIn    int64  `json:"expires_in,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	Scope        string `json:"scope,omitempty"`
 
-// func (r TokenResponse) Values() url.Values {
-// 	v := make(url.Values)
-// 	v.Set("access_token", r.AccessToken)
-// 	v.Set("token_type", r.TokenType)
-// 	v.Set("exires_in", strconv.FormatInt(r.ExiresIn, 10))
-// 	if r.RefreshToken != "" {
-// 		v.Set("refresh_token", r.RefreshToken)
-// 	}
-// 	if r.Scope != "" {
-// 		v.Set("scope", r.Scope)
-// 	}
-// 	if r.State != "" {
-// 		v.Set("state", r.State)
-// 	}
-// 	return v
-// }
+	// for ReponseType = id_token
+	IdToken string `json:"id_token,omitempty"`
+
+	State string `json:"state,omitempty"`
+}
 
 func FilterRequestedScopes(scopes []string, requestedScopes []string) []string {
 	n := 0
@@ -468,45 +532,3 @@ SCOPES:
 	}
 	return scopes[:n]
 }
-
-////////////////////////////////////////////////////////////////////////////////
-
-// type AuthorizationRequest struct {
-// 	Subject string
-// 	TokenRequest
-// 	State string
-// }
-
-// func (req *AuthorizationRequest) DecodeValues(v url.Values) {
-// 	req.Subject = v.Get("sub")
-// 	req.ResponseType = v.Get("response_type")
-// 	req.Scope = v.Get("scope")
-// 	req.Nonce = v.Get("nonce")
-// 	req.State = v.Get("state")
-// }
-
-// type AuthorizationResponse struct {
-// 	Code string `json:"code,omitempty"`
-// 	TokenResponse
-// 	State string `json:"state,omitempty"`
-// }
-
-// func (resp AuthorizationResponse) EncodeValues() url.Values {
-// 	v := make(url.Values)
-// 	if resp.State != "" {
-// 		v.Set("state", resp.State)
-// 	}
-// 	if resp.AccessToken != "" {
-// 		v.Set("access_token", resp.AccessToken)
-// 		v.Set("expires_in", strconv.FormatInt(resp.ExiresIn, 10))
-// 		v.Set("scope", resp.Scope)
-// 		v.Set("token_type", resp.TokenType)
-// 		if resp.RefreshToken != "" {
-// 			v.Set("refresh_token", resp.RefreshToken)
-// 		}
-// 	}
-// 	if resp.IdToken != "" {
-// 		v.Set("id_token", resp.IdToken)
-// 	}
-// 	return v
-// }

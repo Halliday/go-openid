@@ -20,19 +20,27 @@ type Userinfo struct {
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
 
-	Gender              string  `json:"gender,omitempty"`
-	Birthdate           string  `json:"birthdat,omitempty"`
-	Zoneinfo            string  `json:"zoneinfo,omitempty"`
-	Locale              string  `json:"locale,omitempty"`
-	PhoneNumber         string  `json:"phone_number,omitempty"`
-	PhoneNumberVerified bool    `json:"phone_number_verified"`
-	Address             Address `json:"address,omitempty"`
+	Gender              string   `json:"gender,omitempty"`
+	Birthdate           string   `json:"birthdat,omitempty"`
+	Zoneinfo            string   `json:"zoneinfo,omitempty"`
+	Locale              string   `json:"locale,omitempty"`
+	PhoneNumber         string   `json:"phone_number,omitempty"`
+	PhoneNumberVerified bool     `json:"phone_number_verified"`
+	Address             *Address `json:"address,omitempty"`
 
 	// Password              string `json:"password,omitempty"`
 	// PasswordResetSentAt int64  `json:"lastPasswordResetSend,omitempty"`
 
-	SocialProviders map[string]string `json:"social_providers,omitempty"`
-	UpdatedAt       int64             `json:"updated_at,omitempty"`
+	SocialProviders []*SocialProvider `json:"social_providers,omitempty"`
+
+	UpdatedAt int64 `json:"updated_at,omitempty"`
+}
+
+type SocialProvider struct {
+	Issuer  string `json:"iss"`
+	Profile string `json:"profile,omitempty"`
+	Picture string `json:"picture,omitempty"`
+	Website string `json:"website,omitempty"`
 }
 
 type UserinfoUpdate struct {
@@ -60,6 +68,7 @@ type UserinfoUpdate struct {
 
 type IdTokenClaims struct {
 	Audience string `json:"aud"`
+	Issuer   string `json:"iss"`
 	Userinfo
 	Nonce string `json:"nonce"`
 }

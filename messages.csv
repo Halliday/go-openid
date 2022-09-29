@@ -12,14 +12,23 @@ no_client;400;No client with that id.
 no_grant_type;400;Unsupported grant type.
 social_not_found;400;No such social provider.
 discover_status;500;The server did not return a 200 status code.
+discover_content_type;500;The server did not return JSON.
 unsupported_response_types;500;The social provider does not support 'id_token' response types.
 invalid_credentials;400;Invalid credentials.
 unverified_email;403;Unverified email.
 unsupported_token_type;400;Unsupported token type.
 too_many_requests;429;Too many requests.
 email_already_registered;400;The email address is already registered.
-invalid_aud;400;Invalid token audience.
-invalid_iss;400;Invalid token issuer.
+
+token_bad_aud;401;Token has invalid audience.
+token_bad_iss;401;Token has invalid issuer.
+token_bad_nbf;401;Token is not valid yet.
+token_bad_exp;401;Token is expired.
+token_bad_alg;401;Token uses invalid algorithm.
+token_bad_iat;401;Token is not valid yet.
+
+missing_scope;403;Missing scope.
+
 invalid_jwk;0;Invalid JWK.
 unknown_jwk_kty;400;Unknown JWK key type.
 no_kid;400;The token has no key id set.

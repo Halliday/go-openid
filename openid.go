@@ -21,8 +21,8 @@ type UserStore interface {
 }
 
 type SessionStore interface {
-	RefreshSession(ctx context.Context, aud string, id string) (sub string, scopes []string, err error)
-	CreateSession(ctx context.Context, aud string, sub string, scopes []string) (id string, err error)
+	RefreshSession(ctx context.Context, aud string, id string, newScopes []string) (sub string, grantedScopes []string, err error)
+	CreateSession(ctx context.Context, aud string, sub string, scopes []string) (id string, grantedScopes []string, err error)
 	RevokeSession(ctx context.Context, aud string, id string) (err error)
 }
 

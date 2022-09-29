@@ -6,7 +6,6 @@ import (
 )
 
 type Session struct {
-	// Id      string
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 	Aud       string

@@ -78,6 +78,9 @@ func Discover(url string) (c *Configuration, err error) {
 	if resp.StatusCode != 200 {
 		return nil, e("discover_status", "StatusCode", resp.Status)
 	}
+	if contentType := resp.Header.Get("Content-Type"); contentType != "application/json" {
+		return nil, e("discover_content_type", "Content-Type", contentType)
+	}
 	c = new(Configuration)
 	err = json.NewDecoder(resp.Body).Decode(c)
 	return c, err
