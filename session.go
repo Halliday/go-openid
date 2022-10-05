@@ -56,22 +56,3 @@ SCOPES:
 	}
 	return true
 }
-
-// func (sess *Session) SetProfilePicture(r io.Reader) error {
-// 	data, err := ioutil.ReadAll(r)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	cfg, err := png.DecodeConfig(bytes.NewBuffer(data))
-// 	if err != nil {
-// 		return err
-// 	}
-// 	if cfg.Width != 64 || cfg.Height != 64 {
-// 		return fmt.Errorf("bad image size, expected 64x64")
-// 	}
-// 	filename := filepath.Join(sess.Server.PictureDir, sess.Aud, sess.Subject, "64.png")
-// 	if err := os.WriteFile(filename, data, 0644); err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }

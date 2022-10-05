@@ -36,20 +36,35 @@ type Server struct {
 
 	SessionStore SessionStore
 	UserStore    UserStore
+
+	GrantScopes func(ctx context.Context, aud string, sub string, scopes []string) (grantedScopes []string, err error)
+}
+
+func GrantScopes(ctx context.Context, aud string, sub string, scopes []string) (grantedScopes []string, err error) {
+	if Scopes(scopes).Has("openid") {
+		if len(scopes) == 1 {
+			return scopes, nil
+		}
+		return []string{"openid"}, nil
+	}
+	return nil, nil
 }
 
 func NewServer(addr string, sessionStore SessionStore, userStore UserStore, next http.Handler) *Server {
 	s := &Server{
-		Addr:         addr,
+		Addr: addr,
+
 		SessionStore: sessionStore,
 		UserStore:    userStore,
-		// Clients:      clients,
-		TokenExpiry: time.Minute * 10,
+		TokenExpiry:  time.Minute * 10,
+
 		Config: &Configuration{
 			Issuer:                addr,
 			AuthorizationEndpoint: addr + "login",
 			TokenEndpoint:         addr + "token",
 		},
+
+		GrantScopes: GrantScopes,
 	}
 
 	s.route = router.Route{
@@ -72,15 +87,6 @@ func NewServer(addr string, sessionStore SessionStore, userStore UserStore, next
 				},
 			},
 			"userinfo": rpc.MustNew(s.userinfo),
-			// "userinfo": &router.Route{
-			// 	Paths: map[string]http.Handler{
-			// 		"picture": &router.Route{
-			// 			Methods: map[string]http.Handler{
-			// 				http.MethodPost: http.HandlerFunc(s.servePostUserinfoPicture),
-			// 			},
-			// 		},
-			// 	},
-			// },
 		},
 		Next: next,
 	}
@@ -139,14 +145,6 @@ func (s *Server) serveToken(resp http.ResponseWriter, req *http.Request) {
 		tools.ServeError(resp, err)
 		return
 	}
-	// responseType := req.Form.Get("response_type")
-
-	// clientId := req.Form.Get("client_id")
-	// client := s.getClient(clientId)
-	// if client == nil {
-	// 	tools.ServeError(resp, e("no_client"))
-	// 	return
-	// }
 
 	grantType := req.Form.Get("grant_type")
 
@@ -162,7 +160,10 @@ func (s *Server) serveToken(resp http.ResponseWriter, req *http.Request) {
 	switch grantType {
 	case "refresh_token":
 		refreshToken := req.Form.Get("refresh_token")
-		scopes := NewScopes(req.Form.Get("scope"))
+		var scopes []string
+		if req.Form.Has("scope") {
+			scopes = NewScopes(req.Form.Get("scope"))
+		}
 		accessToken, scopes, expiresIn, err := s.RefreshSession(ctx, refreshToken, scopes)
 		if err != nil {
 			tools.ServeError(resp, err)
@@ -216,11 +217,11 @@ func (s *Server) userinfo(ctx context.Context) (*Userinfo, error) {
 ////////////////////////////////////////////////////////////////////////////////
 
 func (s *Server) Revoke(ctx context.Context, refreshToken string) (err error) {
-	aud, id, err := s.ParseRefreshToken(refreshToken)
+	_, id, err := s.ParseRefreshToken(refreshToken)
 	if err != nil {
 		return err
 	}
-	return s.SessionStore.RevokeSession(ctx, aud, id)
+	return s.SessionStore.RevokeSession(ctx, id)
 }
 
 type RevokeTokenRequest struct {
@@ -379,7 +380,12 @@ func (s *Server) ParseAccessToken(accessToken string) (aud string, sub string, s
 
 func (s *Server) CreateSession(ctx context.Context, aud string, sub string, scopes []string, nonce string) (refreshToken string, accessToken string, grantedScopes []string, expiresIn int64, idToken string, err error) {
 
-	sess, grantedScopes, err := s.SessionStore.CreateSession(ctx, aud, sub, scopes)
+	grantedScopes, err = s.GrantScopes(ctx, aud, sub, scopes)
+	if err != nil {
+		return "", "", nil, 0, "", err
+	}
+
+	sess, err := s.SessionStore.CreateSession(ctx, aud, sub, scopes)
 	if err != nil {
 		return "", "", nil, 0, "", err
 	}
@@ -406,12 +412,12 @@ func (s *Server) CreateSession(ctx context.Context, aud string, sub string, scop
 	return refreshToken, accessToken, grantedScopes, int64(s.TokenExpiry / time.Second), idToken, nil
 }
 
-func (s *Server) RefreshSession(ctx context.Context, refreshToken string, newScopes []string) (accessToken string, grantedScopes []string, expiresIn int64, err error) {
+func (s *Server) RefreshSession(ctx context.Context, refreshToken string, filterScopes []string) (accessToken string, grantedScopes []string, expiresIn int64, err error) {
 	aud, sess, err := s.ParseRefreshToken(refreshToken)
 	if err != nil {
 		return "", nil, 0, err
 	}
-	sub, grantedScopes, err := s.SessionStore.RefreshSession(ctx, aud, sess, newScopes)
+	sub, grantedScopes, err := s.SessionStore.RefreshSession(ctx, sess, filterScopes)
 	if err != nil {
 		return "", nil, 0, err
 	}

@@ -6,7 +6,7 @@ type Scopes []string
 
 func NewScopes(s string) Scopes {
 	if s == "" {
-		return nil
+		return Scopes{}
 	}
 	return Scopes(strings.Split(s, " "))
 }
