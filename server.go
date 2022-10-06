@@ -389,10 +389,12 @@ func (s *Server) CreateSession(ctx context.Context, aud string, sub string, scop
 	if err != nil {
 		return "", "", nil, 0, "", err
 	}
+
 	accessToken, err = s.CreateAccessToken(aud, sub, grantedScopes)
 	if err != nil {
 		return "", "", nil, 0, "", err
 	}
+
 	refreshToken, err = s.CreateRefreshToken(aud, sess)
 	if err != nil {
 		return "", "", nil, 0, "", err
@@ -417,10 +419,17 @@ func (s *Server) RefreshSession(ctx context.Context, refreshToken string, filter
 	if err != nil {
 		return "", nil, 0, err
 	}
-	sub, grantedScopes, err := s.SessionStore.RefreshSession(ctx, sess, filterScopes)
+
+	sub, scopes, err := s.SessionStore.RefreshSession(ctx, sess, filterScopes)
 	if err != nil {
 		return "", nil, 0, err
 	}
+
+	grantedScopes, err = s.GrantScopes(ctx, aud, sub, scopes)
+	if err != nil {
+		return "", nil, 0, err
+	}
+
 	accessToken, err = s.CreateAccessToken(aud, sub, grantedScopes)
 	if err != nil {
 		return "", nil, 0, err
